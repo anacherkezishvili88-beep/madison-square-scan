@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scan Madison Square</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  /* Layout: a full-window dark view and almost nothing else. Only a small place name top left and one Reset button bottom right. A single dark look on purpose, since the cloud is made of light. */
+  color-scheme: dark;
+  --bg: #05070B;
+  --ink: #E6EEF2;
+  --muted: #7F8F9B;
+  --line: rgba(230, 238, 242, .2);
+  --panel: rgba(6, 10, 16, .72);
+  --portal: #FF55BD;
+  --focus: #E6EEF2;
+  --font-display: 'Bricolage Grotesque', 'Helvetica Neue', Arial, sans-serif;
+  --font-body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 14px; line-height: 1.45; }
+.stage { position: relative; width: 100%; height: 100%; min-height: 420px; overflow: hidden; background: var(--bg); }
+#gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; outline: none; }
+#gl.drag { cursor: grabbing; }
+.vig { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at 50% 50%, transparent 50%, rgba(2, 3, 6, .7) 100%); }
+
+.hud { position: absolute; pointer-events: none; display: grid; gap: 8px; }
+.hud > * { pointer-events: auto; }
+.tl { top: max(14px, env(safe-area-inset-top, 0px)); left: max(16px, env(safe-area-inset-left, 0px)); }
+.bl { left: max(16px, env(safe-area-inset-left, 0px)); bottom: max(12px, env(safe-area-inset-bottom, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); display: flex; align-items: flex-end; justify-content: flex-end; gap: 12px; pointer-events: none; }
+.bl > * { pointer-events: auto; }
+
+.place { font: 500 10.5px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.prompt { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 16px; text-align: center; pointer-events: none; padding: 24px; transition: opacity 1.2s; }
+.prompt h2 { margin: 0; font: 800 clamp(1.8rem, 1rem + 4vw, 3.6rem)/1 var(--font-display); letter-spacing: -.025em; text-wrap: balance; }
+.prompt .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--ink); opacity: .85; animation: breathe 2.4s ease-in-out infinite; }
+@keyframes breathe { 50% { transform: scale(1.8); opacity: .25; } }
+.prompt.gone { opacity: 0; }
+@media (prefers-reduced-motion: reduce) { .prompt .dot { animation: none; } * { transition: none !important; } }
+
+.loading { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 12px; background: var(--bg); text-align: center; padding: 24px; z-index: 5; }
+.loading p { margin: 0; font: 500 11px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
+.loading .bar { width: min(240px, 60vw); }
+
+.btn { font: 500 12.5px var(--font-body); background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 8px 14px; min-height: 36px; cursor: pointer; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); flex: none; }
+.btn:hover { border-color: var(--ink); }
+.btn:focus-visible, #gl:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.flash { position: absolute; inset: 0; background: #05070B; opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+
+
+<div class="stage" id="stage">
+  <canvas id="gl" tabindex="0" aria-label="Interactive 3D point cloud scan. Click or tap to scan, drag to look around."></canvas>
+  <div class="vig"></div>
+  <div class="flash" id="flash"></div>
+
+  <div class="prompt" id="prompt">
+    <span class="dot"></span>
+    <h2>Click anywhere in the dark</h2>
+  </div>
+
+  <div class="hud tl"><p class="place" id="place">Madison Square Park</p></div>
+
+  <div class="hud bl">
+    <button type="button" class="btn" id="reset">Reset</button>
+  </div>
+
+  <div class="loading" id="loading">
+    <p id="loadTxt">Loading</p>
+    <div class="bar"><i id="loadBar" style="width:0%"></i></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  'use strict';
+  var stage = document.getElementById('stage');
+  var canvas = document.getElementById('gl');
+  var $ = function (id) { return document.getElementById(id); };
+  var loadTxt = $('loadTxt');
+  if (!window.THREE) { loadTxt.textContent = 'The 3D library did not load. Reload the page.'; return; }
+  var THREE = window.THREE;
+  var renderer;
+  try { renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: false, powerPreference: 'high-performance' }); }
+  catch (err) { loadTxt.textContent = 'This browser cannot draw the 3D view.'; return; }
+
+  var reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  var small = Math.min(window.innerWidth, window.innerHeight) < 700 || /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+  var QUALITY = small ? 0.5 : 1;
+  var PR = Math.min(window.devicePixelRatio || 1, small ? 1.5 : 2);
+  renderer.setPixelRatio(PR);
+  renderer.setClearColor(0x05070B, 1);
+
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(70, 1, 0.05, 600);
+  var clockStart = performance.now();
+  var now = function () { return (performance.now() - clockStart) / 1000; };
+
+  // ---------- shaders ----------
+  var VERT = [
+    'uniform float uTime; uniform float uProj; uniform float uSize; uniform float uDim; uniform float uFog; uniform float uPR;',
+    'attribute vec3 aColor; attribute float aT;',
+    'varying vec3 vCol;',
+    'void main(){',
+    '  float w = uTime - aT;',
+    '  if (w < 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vCol = vec3(0.0); return; }',
+    '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
+    '  float dist = max(-mv.z, 0.2);',
+    '  vec3 c = pow(aColor, vec3(0.85)) * 1.12;',
+    '  float flash = exp(-w * 1.5);',
+    '  c = mix(c, vec3(1.0, 0.96, 0.88) * 1.3, flash * 0.32);',
+    '  c *= exp(-dist * uFog) * uDim;',
+    '  vCol = c;',
+    '  float sz = uSize * uProj / dist * (1.0 + flash * 0.8);',
+    '  gl_PointSize = clamp(sz, 1.5 * uPR, 10.0 * uPR);',
+    '  gl_Position = projectionMatrix * mv;',
+    '}'
+  ].join('\n');
+  var FRAG = [
+    'varying vec3 vCol;',
+    'void main(){ vec2 d = gl_PointCoord - vec2(0.5); if (dot(d, d) > 0.25) discard; gl_FragColor = vec4(vCol, 1.0); }'
+  ].join('\n');
+  var shared = { uTime: { value: 0 }, uProj: { value: 800 }, uPR: { value: PR } };
+
+  // ---------- data loading (base64 text) ----------
+  var B64LUT = (function () {
+    var t = new Uint8Array(256).fill(255), c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    for (var i = 0; i < 64; i++) t[c.charCodeAt(i)] = i;
+    return t;
+  })();
+  function decodeB64(src) {
+    var len = src.length;
+    while (len > 0 && (src[len - 1] === 10 || src[len - 1] === 13 || src[len - 1] === 32)) len--;
+    var pad = src[len - 1] === 61 ? (src[len - 2] === 61 ? 2 : 1) : 0;
+    var out = new Uint8Array(len / 4 * 3 - pad), o = 0;
+    for (var i = 0; i < len; i += 4) {
+      var a = B64LUT[src[i]], b = B64LUT[src[i + 1]], c = B64LUT[src[i + 2]] & 63, d = B64LUT[src[i + 3]] & 63;
+      var v = (a << 18) | (b << 12) | (c << 6) | d;
+      if (o < out.length) out[o++] = (v >> 16) & 255;
+      if (o < out.length) out[o++] = (v >> 8) & 255;
+      if (o < out.length) out[o++] = v & 255;
+    }
+    return out.buffer;
+  }
+  function fetchBin(url, onProg) {
+    return fetch(url).then(function (res) {
+      if (!res.ok) throw new Error(url + ' ' + res.status);
+      if (!res.body || !res.body.getReader) return res.arrayBuffer().then(function (b) { onProg(b.byteLength); return decodeB64(new Uint8Array(b)); });
+      var reader = res.body.getReader(), chunks = [], got = 0;
+      return (function pump() {
+        return reader.read().then(function (r) {
+          if (r.done) {
+            var all = new Uint8Array(got), o = 0;
+            chunks.forEach(function (c) { all.set(c, o); o += c.length; });
+            return decodeB64(all);
+          }
+          chunks.push(r.value); got += r.value.length; onProg(got); return pump();
+        });
+      })();
+    });
+  }
+  var progress = { park: 0, subway: 0 }, totals = { park: 1, subway: 1 };
+  function paintProgress() {
+    var p = (progress.park + progress.subway) / (totals.park + totals.subway);
+    $('loadBar').style.width = Math.min(100, p * 100).toFixed(0) + '%';
+  }
+  function loadCloud(name) {
+    return fetch(name + '.json').then(function (r) { if (!r.ok) throw new Error(name + '.json'); return r.json(); }).then(function (meta) {
+      totals[name] = Math.ceil((meta.posBytes + meta.count * 3) / 3) * 4;
+      return fetchBin(name + '.b64.txt', function (g) { progress[name] = g; paintProgress(); }).then(function (buf) { return { meta: meta, buf: buf }; });
+    });
+  }
+
+  // ---------- clouds ----------
+  function makeCloud(data, opts) {
+    var meta = data.meta, n = meta.count, N = Math.max(1, Math.floor(n * QUALITY));
+    var q = new Uint16Array(data.buf, 0, n * 3), col = new Uint8Array(data.buf, meta.posBytes, n * 3);
+    var mn = meta.min, mx = meta.max;
+    var cx = (mn[0] + mx[0]) / 2, cy = (mn[1] + mx[1]) / 2, cz = (mn[2] + mx[2]) / 2;
+    var sx = (mx[0] - mn[0]) / 65535, sy = (mx[1] - mn[1]) / 65535, sz = (mx[2] - mn[2]) / 65535;
+    var pos = new Float32Array(N * 3), aT = new Float32Array(N).fill(1e9);
+    for (var i = 0; i < N; i++) {
+      var jx = opts.jitter ? (((i * 2654435761) >>> 0) / 4294967296 - 0.5) * opts.jitter : 0;
+      var jy = opts.jitter ? (((i * 1597334677) >>> 0) / 4294967296 - 0.5) * opts.jitter : 0;
+      var jz = opts.jitter ? (((i * 3266489917) >>> 0) / 4294967296 - 0.5) * opts.jitter : 0;
+      pos[i * 3] = mn[0] + q[i * 3] * sx - cx + jx;
+      pos[i * 3 + 1] = mn[1] + q[i * 3 + 1] * sy - cy + jy;
+      pos[i * 3 + 2] = mn[2] + q[i * 3 + 2] * sz - cz + jz;
+    }
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(col.slice(0, N * 3), 3, true));
+    var tAttr = new THREE.BufferAttribute(aT, 1); tAttr.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('aT', tAttr);
+    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 400);
+    var uni = { uTime: shared.uTime, uProj: shared.uProj, uPR: shared.uPR, uSize: { value: opts.size }, uDim: { value: 1 }, uFog: { value: opts.fog } };
+    var mat = new THREE.ShaderMaterial({ uniforms: uni, vertexShader: VERT, fragmentShader: FRAG, transparent: false, depthTest: true, depthWrite: true });
+    var pts = new THREE.Points(geo, mat);
+    pts.frustumCulled = false; pts.visible = false;
+    scene.add(pts);
+    var step = Math.max(1, Math.floor(N / 30000)), samples = [];
+    for (var s = 0; s < N; s += step) samples.push(s);
+    return { N: N, pos: pos, aT: aT, attr: tAttr, uni: uni, pts: pts, samples: Int32Array.from(samples), revealed: 0, center: [cx, cy, cz], opts: opts };
+  }
+
+  // ---------- state ----------
+  var park, sub, cur = null, curName = 'park';
+  var spots = {};              // per scene: { target:[x,y,z], marker, found, clicks }
+  var busy = false;
+  var cam = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 };
+  var fwd = new THREE.Vector3();
+  function forwardOf(yaw, pitch, out) { var cp = Math.cos(pitch); return out.set(-Math.sin(yaw) * cp, Math.sin(pitch), -Math.cos(yaw) * cp); }
+  function applyCam() {
+    forwardOf(cam.yaw, cam.pitch, fwd);
+    camera.position.set(cam.x, cam.y, cam.z);
+    camera.lookAt(cam.x + fwd.x, cam.y + fwd.y, cam.z + fwd.z);
+    camera.updateMatrixWorld();
+  }
+  var BOUNDS = {
+    park: { x: [-32, 42], y: [-6, 40], z: [-62, 62] },
+    sub: { x: [-26, 26], y: [-14, 16], z: [-22, 22] }
+  };
+  function clampCam() {
+    var b = BOUNDS[curName];
+    cam.x = Math.max(b.x[0], Math.min(b.x[1], cam.x));
+    cam.y = Math.max(b.y[0], Math.min(b.y[1], cam.y));
+    cam.z = Math.max(b.z[0], Math.min(b.z[1], cam.z));
+    cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch));
+  }
+  var EYE = 1.65, GROUND_PARK = -1.15, EYE_PARK = GROUND_PARK + EYE;
+  function move(dx, dy, dz) { cam.x += dx; cam.y += dy; cam.z += dz; }
+  function moveForward(d) { move(-Math.sin(cam.yaw) * d, 0, -Math.cos(cam.yaw) * d); }
+  function moveRight(d) { move(Math.cos(cam.yaw) * d, 0, -Math.sin(cam.yaw) * d); }
+
+  var roundTex = (function () {
+    var c = document.createElement('canvas'); c.width = c.height = 32;
+    var g = c.getContext('2d'), grad = g.createRadialGradient(16, 16, 0, 16, 16, 15);
+    grad.addColorStop(0, 'rgba(255,255,255,1)'); grad.addColorStop(0.55, 'rgba(255,255,255,0.9)'); grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad; g.fillRect(0, 0, 32, 32);
+    return new THREE.CanvasTexture(c);
+  })();
+
+  // ---------- markers (the way up and the way down) ----------
+  function buildMarker(c, hx, hz, h) {
+    var P = [], i, y0 = c[1];
+    for (i = 0; i <= 30; i++) { var u = i / 30; P.push(-hx + 2 * hx * u, y0, -hz); P.push(-hx + 2 * hx * u, y0, hz); }
+    for (i = 0; i <= 60; i++) { var v = i / 60; P.push(-hx, y0, -hz + 2 * hz * v); P.push(hx, y0, -hz + 2 * hz * v); }
+    for (i = 0; i < 260; i++) {
+      var a = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random());
+      P.push(Math.cos(a) * rr * hx * 0.5, y0 + Math.random() * h, Math.sin(a) * rr * hz * 0.5);
+    }
+    var g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+    var m = new THREE.PointsMaterial({ size: 0.09, sizeAttenuation: true, map: roundTex, color: 0xFF55BD, transparent: true, opacity: 0, depthTest: false, blending: THREE.AdditiveBlending });
+    var pts = new THREE.Points(g, m); pts.frustumCulled = false; pts.visible = false;
+    pts.position.set(c[0], 0, c[2]);
+    scene.add(pts);
+    return pts;
+  }
+
+  // ---------- falling and rising dust ----------
+  var dust = (function () {
+    var N = 2600, arr = new Float32Array(N * 3);
+    for (var i = 0; i < N; i++) { arr[i * 3] = (Math.random() - 0.5) * 34; arr[i * 3 + 1] = -10 + Math.random() * 110; arr[i * 3 + 2] = (Math.random() - 0.5) * 34; }
+    var g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    var m = new THREE.PointsMaterial({ size: 2.4, sizeAttenuation: false, map: roundTex, color: 0xC9D3DA, transparent: true, opacity: 0, depthTest: false });
+    var p = new THREE.Points(g, m); p.frustumCulled = false; p.visible = false; scene.add(p);
+    return p;
+  })();
+
+  // ---------- walking: stay at eye height above whatever is underfoot ----------
+  var floorGrid = null, CELL = 0.4;
+  function buildFloorGrid(cloud) {
+    var g = new Map(), pos = cloud.pos, N = cloud.N;
+    for (var i = 0; i < N; i++) {
+      var k = Math.floor(pos[i * 3] / CELL) * 8192 + Math.floor(pos[i * 3 + 2] / CELL);
+      var a = g.get(k); if (!a) { a = []; g.set(k, a); }
+      a.push(pos[i * 3 + 1]);
+    }
+    return g;
+  }
+  function floorAt(x, z, maxY) {
+    var cx = Math.floor(x / CELL), cz = Math.floor(z / CELL), best = -1e9;
+    for (var ix = -1; ix <= 1; ix++) for (var iz = -1; iz <= 1; iz++) {
+      var a = floorGrid.get((cx + ix) * 8192 + (cz + iz)); if (!a) continue;
+      for (var j = 0; j < a.length; j++) if (a[j] <= maxY && a[j] > best) best = a[j];
+    }
+    return best > -1e8 ? best : null;
+  }
+  function holdEyeLevel(dt) {
+    if (curName === 'park') { cam.y += (EYE_PARK - cam.y) * Math.min(1, dt * 8); return; }
+    var f = floorAt(cam.x, cam.z, cam.y - EYE + 0.6);
+    if (f !== null) cam.y += (f + EYE - cam.y) * Math.min(1, dt * 7);
+  }
+
+  // ---------- reveal and pick ----------
+  var rayO = new THREE.Vector3(), rayD = new THREE.Vector3();
+  function setRay(cx, cy) {
+    var r = canvas.getBoundingClientRect();
+    var nx = ((cx - r.left) / r.width) * 2 - 1, ny = -((cy - r.top) / r.height) * 2 + 1;
+    rayO.copy(camera.position);
+    rayD.set(nx, ny, 0.5).unproject(camera).sub(camera.position).normalize();
+  }
+  function pickIndex(cloud, t) {
+    var pos = cloud.pos, aT = cloud.aT, S = cloud.samples;
+    var ox = rayO.x, oy = rayO.y, oz = rayO.z, dx = rayD.x, dy = rayD.y, dz = rayD.z;
+    var bestRev = -1, bestAlong = 1e9, bestAny = -1, bestScore = 1e9;
+    for (var k = 0; k < S.length; k++) {
+      var i = S[k], vx = pos[i * 3] - ox, vy = pos[i * 3 + 1] - oy, vz = pos[i * 3 + 2] - oz;
+      var along = vx * dx + vy * dy + vz * dz;
+      if (along < 0.6) continue;
+      var p2 = vx * vx + vy * vy + vz * vz - along * along, perp = Math.sqrt(p2 > 0 ? p2 : 0);
+      if (aT[i] <= t && perp < 0.35 && along < bestAlong) { bestAlong = along; bestRev = i; }
+      var score = perp + 0.01 * along;
+      if (score < bestScore) { bestScore = score; bestAny = i; }
+    }
+    return bestRev >= 0 ? bestRev : bestAny;
+  }
+  var SPEED = reduced ? 80 : 3;
+  // A click blooms outward over a few seconds. A sparse scatter of points arrives first,
+  // then the same area fills in behind it. The edge is uneven, not a clean circle.
+  function revealAt(cloud, sx, sy, sz, R, speed) {
+    var pos = cloud.pos, aT = cloud.aT, N = cloud.N, t = now(), added = 0, lim2 = R * R * 1.7;
+    var ph = Math.random() * 6.283, slow = reduced ? 0 : 1;
+    for (var i = 0; i < N; i++) {
+      if (aT[i] < 1e8) continue;
+      var x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
+      var dx = x - sx, dy = y - sy, dz = z - sz, d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > lim2) continue;
+      var d = Math.sqrt(d2);
+      var n = 0.20 * Math.sin(x * 0.29 + ph) + 0.15 * Math.sin(z * 0.23 - ph * 1.7 + y * 0.31) + 0.12 * Math.sin((x + z) * 0.11 + ph * 2.3);
+      if (d > R * (1 + n)) continue;
+      var scout = (i % 8 === 0);
+      var delay = d / speed + (scout ? 0 : (1.6 + d / speed * 0.8 + Math.random() * 3.2) * slow);
+      aT[i] = t + delay + Math.random() * 0.2; added++;
+    }
+    cloud.revealed += added;
+    cloud.attr.needsUpdate = true;
+    return added;
+  }
+
+  var lastPct = -1;
+  function paintScan() {}
+
+  // ---------- click ----------
+  function showPrompt(on) { $('prompt').classList.toggle('gone', !on); }
+  function onClick(cx, cy) {
+    if (busy || !cur) return;
+    var sp = spots[curName], t = now();
+    if (sp.clicks === 0) showPrompt(false);
+    if (sp.found) {
+      var v = new THREE.Vector3(sp.target[0], sp.target[1] + 2.5, sp.target[2]).project(camera);
+      var r = canvas.getBoundingClientRect();
+      var px = (v.x * 0.5 + 0.5) * r.width + r.left, py = (-v.y * 0.5 + 0.5) * r.height + r.top;
+      if (v.z < 1 && Math.hypot(px - cx, py - cy) < 120) { sp.clicks++; (curName === 'park' ? descend : ascend)(); return; }
+    }
+    setRay(cx, cy);
+    var i = pickIndex(cur, t);
+    if (i < 0) return;
+    var x = cur.pos[i * 3], y = cur.pos[i * 3 + 1], z = cur.pos[i * 3 + 2];
+    var R = curName === 'park' ? 5.5 + Math.random() * 1.6 : 3.2 + Math.random() * 0.9;
+    revealAt(cur, x, y, z, R, SPEED);
+    sp.clicks++;
+    if (!sp.found) {
+      var dd = curName === 'park' ? Math.hypot(x - sp.target[0], z - sp.target[2]) : Math.hypot(x - sp.target[0], y - sp.target[1], z - sp.target[2]);
+      if (dd < R * 0.8) { sp.found = true; sp.marker.visible = true; }
+    }
+    paintScan();
+  }
+
+  // ---------- tweens ----------
+  var tweens = [];
+  function tween(dur, update, done) { tweens.push({ t0: performance.now(), dur: Math.max(10, (reduced ? 0.01 : dur) * 1000), update: update, done: done }); }
+  var easeIO = function (t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+  var smooth = function (a, b, x) { var t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  function runTweens() {
+    var n = performance.now();
+    for (var i = tweens.length - 1; i >= 0; i--) {
+      var w = tweens[i], t = Math.min(1, (n - w.t0) / w.dur);
+      w.update(t);
+      if (t >= 1) { tweens.splice(i, 1); if (w.done) w.done(); }
+    }
+  }
+  function lerpCam(to, dur, done) {
+    var from = {}; for (var k in to) from[k] = cam[k];
+    if ('yaw' in to) { var dy = to.yaw - from.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy)); to = Object.assign({}, to, { yaw: from.yaw + dy }); }
+    tween(dur, function (t) { var e = easeIO(t); for (var k2 in to) cam[k2] = from[k2] + (to[k2] - from[k2]) * e; }, done);
+  }
+  function fadeDim(cloud, to, dur, done) {
+    var from = cloud.uni.uDim.value;
+    tween(dur, function (t) { cloud.uni.uDim.value = from + (to - from) * easeIO(t); }, done);
+  }
+
+  // ---------- scenes ----------
+  var START = {
+    park: { x: 2, y: -1.15 + 1.65, z: 27, yaw: 0, pitch: -0.08 },
+    sub: { x: -3.77, y: -1.27 + 1.65, z: 2.41, yaw: -1.57, pitch: -0.05 }
+  };
+  function setScene(name) {
+    curName = name; cur = name === 'park' ? park : sub; lastPct = -1;
+    park.pts.visible = name === 'park'; sub.pts.visible = name === 'sub';
+    cur.uni.uDim.value = 1;
+    $('place').textContent = name === 'park' ? 'Madison Square Park' : '23rd Street Station';
+    var sp = spots[name];
+    spots.park.marker.visible = name === 'park' && spots.park.found;
+    spots.sub.marker.visible = name === 'sub' && spots.sub.found;
+    showPrompt(sp.clicks === 0);
+    paintScan();
+  }
+  function startDust(cx, cy, cz, y0Off) {
+    dust.position.set(cx, cy + y0Off, cz); dust.material.opacity = 0.55; dust.visible = true;
+  }
+  function descend() {
+    if (busy || curName !== 'park') return;
+    busy = true; showPrompt(false);
+    var p = spots.park.target;
+    lerpCam({ x: p[0], y: EYE_PARK, z: p[2] + 5.5, yaw: 0, pitch: -0.05 }, 1.8, function () {
+      lerpCam({ z: p[2], pitch: -0.9 }, 1.4, function () { lerpCam({ y: EYE_PARK - 14, pitch: -1.3 }, 1.5); });
+      fadeDim(park, 0, 1.6, function () {
+        park.pts.visible = false; spots.park.marker.visible = false;
+        $('flash').style.opacity = 1;
+        setTimeout(function () { $('flash').style.opacity = 0; fallIntoStation(); }, 250);
+      });
+    });
+  }
+  function fallIntoStation() {
+    var L = START.sub, H = 70;
+    setScene('sub'); showPrompt(false);
+    cam.x = L.x; cam.z = L.z; cam.y = L.y + H; cam.yaw = L.yaw; cam.pitch = -1.4;
+    startDust(L.x, L.y, L.z, -10);
+    tween(4.6, function (t) {
+      var e = easeIO(t);
+      cam.y = L.y + H * (1 - e);
+      cam.pitch = -1.4 + (L.pitch + 1.4) * smooth(0.45, 1, t);
+      dust.material.opacity = 0.55 * (1 - smooth(0.72, 1, t));
+    }, function () { dust.visible = false; busy = false; showPrompt(spots.sub.clicks === 0); });
+  }
+  function ascend() {
+    if (busy || curName !== 'sub') return;
+    busy = true; showPrompt(false);
+    var p = spots.sub.target;
+    lerpCam({ x: p[0], y: p[1] + EYE, z: p[2], pitch: 0.1 }, 1.6, function () {
+      startDust(p[0], p[1], p[2], -10);
+      lerpCam({ y: p[1] + 28, pitch: 1.2 }, 1.7);
+      fadeDim(sub, 0, 1.3, function () {
+        sub.pts.visible = false; spots.sub.marker.visible = false;
+        $('flash').style.opacity = 1;
+        setTimeout(function () { $('flash').style.opacity = 0; riseIntoPlaza(); }, 250);
+      });
+    });
+  }
+  function riseIntoPlaza() {
+    var q = spots.park.target, H = 16;
+    setScene('park');
+    var zOff = 7;
+    cam.x = q[0]; cam.z = q[2] + zOff; cam.y = q[1] - H; cam.yaw = 0; cam.pitch = 1.3;
+    startDust(q[0], q[1] - H, q[2] + zOff, -4);
+    var endY = EYE_PARK;
+    tween(3.2, function (t) {
+      var e = easeIO(t);
+      cam.y = (q[1] - H) + (endY - (q[1] - H)) * e;
+      cam.pitch = 1.3 + (-0.1 - 1.3) * smooth(0.5, 1, t);
+      dust.material.opacity = 0.55 * (1 - smooth(0.6, 1, t));
+    }, function () { dust.visible = false; busy = false; });
+  }
+  function resetScan() {
+    if (busy || !cur) return;
+    cur.aT.fill(1e9); cur.revealed = 0; cur.attr.needsUpdate = true; lastPct = -1;
+    var sp = spots[curName]; sp.found = false; sp.clicks = 0; sp.marker.visible = false;
+    showPrompt(true);
+  }
+  $('reset').addEventListener('click', resetScan);
+
+  // ---------- pointer controls: look, pan, dolly ----------
+  var ptrs = new Map(), down = null, pinch = null;
+  var DOLLY = function () { return curName === 'park' ? 1 : 0.5; };
+  canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  canvas.addEventListener('pointerdown', function (e) {
+    if (busy) return;
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (ptrs.size === 1) down = { x: e.clientX, y: e.clientY, t: performance.now(), moved: 0, button: e.button };
+    else { down = null; var a = Array.from(ptrs.values()); pinch = { d: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y), mx: (a[0].x + a[1].x) / 2, my: (a[0].y + a[1].y) / 2 }; }
+    canvas.classList.add('drag');
+  });
+  canvas.addEventListener('pointermove', function (e) {
+    var p = ptrs.get(e.pointerId); if (!p || busy) return;
+    var dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+    if (ptrs.size === 1) {
+      if (down) down.moved += Math.abs(dx) + Math.abs(dy);
+      if ((e.buttons & 2) || e.shiftKey) { moveRight(-dx * 0.03 * DOLLY()); moveForward(dy * 0.03 * DOLLY()); }
+      else { cam.yaw += dx * 0.0055; cam.pitch += dy * 0.0055; }
+    } else if (ptrs.size === 2 && pinch) {
+      var a = Array.from(ptrs.values()), d = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y), mx = (a[0].x + a[1].x) / 2, my = (a[0].y + a[1].y) / 2;
+      moveForward((d - pinch.d) * 0.06 * DOLLY());
+      moveRight(-(mx - pinch.mx) * 0.03 * DOLLY());
+      pinch.d = d; pinch.mx = mx; pinch.my = my;
+    }
+    clampCam();
+  });
+  function endPtr(e) {
+    var was = ptrs.has(e.pointerId); ptrs.delete(e.pointerId);
+    if (!was) return;
+    if (ptrs.size < 2) pinch = null;
+    if (ptrs.size === 0) {
+      canvas.classList.remove('drag');
+      if (e.type === 'pointerup' && down && down.moved < 8 && performance.now() - down.t < 450 && down.button === 0) onClick(e.clientX, e.clientY);
+      down = null;
+    }
+  }
+  canvas.addEventListener('pointerup', endPtr);
+  canvas.addEventListener('pointercancel', endPtr);
+  canvas.addEventListener('wheel', function (e) { e.preventDefault(); if (busy) return; moveForward(-e.deltaY * 0.02 * DOLLY()); clampCam(); }, { passive: false });
+  var keys = {};
+  window.addEventListener('keydown', function (e) {
+    if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    keys[e.code] = true;
+    if (document.activeElement === canvas && e.code.indexOf('Arrow') === 0) e.preventDefault();
+  });
+  window.addEventListener('keyup', function (e) { keys[e.code] = false; });
+  window.addEventListener('blur', function () { keys = {}; });
+  function moveKeys(dt) {
+    if (busy) return;
+    var f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
+    var s = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+    if (!f && !s) return;
+    var sp = (curName === 'park' ? 7 : 3.5) * (keys.ShiftLeft || keys.ShiftRight ? 3 : 1) * dt;
+    moveForward(f * sp); moveRight(s * sp);
+  }
+
+  // ---------- resize ----------
+  function resize() {
+    var w = stage.clientWidth, h = stage.clientHeight;
+    if (!w || !h) return;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+    shared.uProj.value = h * PR / (2 * Math.tan(camera.fov * Math.PI / 360));
+  }
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(stage); else window.addEventListener('resize', resize);
+
+  // ---------- frame ----------
+  var prev = performance.now();
+  function frame(tms) {
+    requestAnimationFrame(frame);
+    var dt = Math.min(0.05, (tms - prev) / 1000); prev = tms;
+    if (document.hidden || !cur) return;
+    var t = now();
+    shared.uTime.value = t;
+    runTweens();
+    moveKeys(dt);
+    if (!busy) holdEyeLevel(dt);
+    clampCam();
+    applyCam();
+    var sp = spots[curName];
+    if (sp.marker.visible) sp.marker.material.opacity = (0.55 + 0.45 * Math.sin(t * 2.4)) * Math.min(1, cur.uni.uDim.value);
+    paintScan();
+    renderer.render(scene, camera);
+  }
+
+  // ---------- boot ----------
+  Promise.all([loadCloud('park'), loadCloud('subway')]).then(function (res) {
+    park = makeCloud(res[0], { size: 0.046, fog: 0.012, jitter: 0.045 });
+    sub = makeCloud(res[1], { size: 0.027, fog: 0.03 });
+    floorGrid = buildFloorGrid(sub);
+    var pc = park.center, sc = sub.center;
+    spots.park = { target: [8.84 - pc[0], -4.2 - pc[1], -24.21 - pc[2]], found: false, clicks: 0 };
+    spots.park.marker = buildMarker(spots.park.target, 1.35, 2.95, 7);
+    spots.sub = { target: [15.08 - sc[0], 5.87 - sc[1], -3.89 - sc[2]], found: false, clicks: 0 };
+    spots.sub.marker = buildMarker(spots.sub.target, 1.0, 1.3, 5);
+    setScene('park');
+    var s0 = START.park; cam.x = s0.x; cam.y = s0.y; cam.z = s0.z; cam.yaw = s0.yaw; cam.pitch = s0.pitch;
+    resize(); applyCam();
+    $('loading').hidden = true;
+    requestAnimationFrame(function (t0) { prev = t0; frame(t0); });
+  }).catch(function (err) {
+    loadTxt.textContent = 'Could not load the scan. Reload the page to try again.';
+    if (window.console) console.error(err);
+  });
+})();
+</script>
+
+</body>
+</html>
